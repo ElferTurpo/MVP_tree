@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Buscar Imágenes Similares</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        img {
+            max-width: 100px;
+            margin: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Buscar Imágenes Similares usando Multi-VP Tree</h1>
+    <input type="file" id="folderInput" webkitdirectory directory multiple accept="image/*">
+    <div id="images"></div>
+    <h2>Imagen de Consulta</h2>
+    <input type="file" id="queryImageInput" accept="image/*">
+    <h2>Resultados</h2>
+    <div id="result"></div>
+    <script>
+        class MultiVPTree { 
+            constructor(points, numReferences = 2, leafSize = 10) { 
+                this.numReferences = numReferences; 
+                this.leafSize = leafSize; 
+                this.root = this.buildTree(points); 
+            } 
+
+            buildTree(points) { 
+                if (points.length <= this.leafSize) { 
+                    return { points: points }; 
+                } 
+                const references = []; 
+                for (let i = 0; i < this.numReferences; i++) { 
+                    const index = Math.floor(Math.random() * points.length); 
+                    references.push(points[index]); 
+                }
+
+                const distances = points.map(point => references.map(ref => this.distance(point.features, ref.features))); 
+
+                const medianDistances = references.map((_, i) => this.median(distances.map(d => d[i]))); 
+                const leftPoints = points.filter((_, idx) => distances[idx].every((d, i) => d <= medianDistances[i])); 
+                const rightPoints = points.filter((_, idx) => !leftPoints.includes(points[idx])); 
+
+                return { 
+                    references: references, 
+                    medianDistances: medianDistances, 
+                    left: this.buildTree(leftPoints), 
+                    right: this.buildTree(rightPoints) 
+                }; 
+            } 
+
+            search(query) { 
+                return this._search(this.root, query); 
+            } 
+
+            _search(node, query) { 
+                if (node.points) { 
+                    const distances = node.points.map(point => this.distance(query, point.features)); 
+                    return node.points.map((point, idx) => [point, distances[idx]]).sort((a, b) => a[1] - b[1]); 
+                } 
+                const queryDistances = node.references.map(ref => this.distance(query, ref.features)); 
+                const exploreLeft = queryDistances.every((d, i) => d <= node.medianDistances[i]); 
+                const bestBranch = exploreLeft ? node.left : node.right; 
+                const otherBranch = exploreLeft ? node.right : node.left; 
+                let bestResults = this._search(bestBranch, query); 
+                const bestDistances = bestResults.map(result => result[1]);
+                if (queryDistances.some((d, i) => d <= node.medianDistances[i] + Math.max(...bestDistances))) { 
+                    const otherResults = this._search(otherBranch, query); 
+                    bestResults = bestResults.concat(otherResults).sort((a, b) => a[1] - b[1]); 
+                } 
+                return bestResults; 
+            } 
+
+            distance(a, b) { 
+                return Math.sqrt(a.reduce((sum, ai, i) => sum + (ai - b[i]) ** 2, 0)); 
+            } 
+
+            median(values) { 
+                values.sort((a, b) => a - b); 
+                const mid = Math.floor(values.length / 2); 
+                return values.length % 2 === 0 ? (values[mid - 1] + values[mid]) / 2 : values[mid]; 
+            } 
+        }
+
+        function extractFeatures(image, callback) {
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            canvas.width = image.width;
+            canvas.height = image.height;
+            context.drawImage(image, 0, 0, canvas.width, canvas.height);
+            const imageData = context.getImageData(0, 0, canvas.width, canvas.height).data;
+            let r = 0, g = 0, b = 0;
+            for (let i = 0; i < imageData.length; i += 4) {
+                r += imageData[i];
+                g += imageData[i + 1];
+                b += imageData[i + 2];
+            }
+            const pixelCount = imageData.length / 4;
+            r = Math.floor(r / pixelCount);
+            g = Math.floor(g / pixelCount);
+            b = Math.floor(b / pixelCount);
+            callback([r, g, b]);
+        }
+
+        function handleFiles(files, callback) {
+            const points = [];
+            let loadedImages = 0;
+            Array.from(files).forEach(file => {
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const img = new Image();
+                    img.src = event.target.result;
+                    img.onload = () => {
+                        extractFeatures(img, (features) => {
+                            points.push({ image: img, features: features });
+                            loadedImages++;
+                            if (loadedImages === files.length) {
+                                callback(points);
+                            }
+                        });
+                    };
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+
+        document.getElementById('folderInput').addEventListener('change', (event) => {
+            handleFiles(event.target.files, (points) => {
+                const imagesDiv = document.getElementById('images');
+                imagesDiv.innerHTML = '';
+                points.forEach(point => {
+                    const imgWrapper = document.createElement('div');
+                    imgWrapper.innerHTML = `<img src="${point.image.src}" alt="image"><br>Características: ${point.features}`;
+                    imagesDiv.appendChild(imgWrapper);
+                });
+                const tree = new MultiVPTree(points);
+                document.getElementById('queryImageInput').addEventListener('change', (event) => {
+                    const queryFile = event.target.files[0];
+                    const reader = new FileReader();
+                    reader.onload = (event) => {
+                        const queryImg = new Image();
+                        queryImg.src = event.target.result;
+                        queryImg.onload = () => {
+                            extractFeatures(queryImg, (queryFeatures) => {
+                                const results = tree.search(queryFeatures);
+                                const resultDiv = document.getElementById('result');
+                                resultDiv.innerHTML = '';
+                                results.forEach(result => {
+                                    const imgWrapper = document.createElement('div');
+                                    imgWrapper.innerHTML = `<img src="${result[0].image.src}" alt="image"><br>Características: ${result[0].features}<br>Distancia: ${result[1].toFixed(2)}`;
+                                    resultDiv.appendChild(imgWrapper);
+                                });
+                            });
+                        };
+                    };
+                    reader.readAsDataURL(queryFile);
+                });
+            });
+        });
+    </script>
+</body>
+</html>
